@@ -1,7 +1,16 @@
-# binja-xtensa: Architecture Plugin and ESP8266 Loader
+# binja-xtensa: Xtensa Architecture Plugin and ESP8266/ESP32 Loader
 
-Tensilica Xtensa Architecture Plugin and ESP8266 Firmware Loader for Binary
+Tensilica Xtensa Architecture Plugin and ESP8266/ESP32 Firmware Loader for Binary
 Ninja.
+
+> **This is a fork.** The original Xtensa architecture plugin and ESP8266 loader
+> were written by [Zack Orndorff](https://github.com/zackorndorff) — upstream
+> project: [zackorndorff/binja-xtensa](https://github.com/zackorndorff/binja-xtensa).
+> This fork, maintained by Kevin Romero ([@Kvn11](https://github.com/Kvn11)), adds
+> full **ESP32 (Xtensa LX6)** support on top of Zack's work: windowed-register ABI
+> lifting, the ESP32 flash-image loader, the ROM symbol map, and the `__func__`
+> symbol-recovery command. All original code remains © Zack Orndorff under the MIT
+> license; see [LICENSE](LICENSE).
 
 ![screenshot of Binary Ninja showing setup and loop of a decompiled ESP8266
 Arduino project](https://raw.githubusercontent.com/zackorndorff/binja-xtensa/0.5/screenshots/hero.png)
@@ -92,5 +101,7 @@ root of the project.
 
 ## License
 
-This project copyright Zack Orndorff (@zackorndorff) and is available under the
-MIT license. See [LICENSE](LICENSE).
+MIT. The original Xtensa plugin and ESP8266 loader are copyright Zack Orndorff
+([@zackorndorff](https://github.com/zackorndorff)); the ESP32 additions in this
+fork are copyright Kevin Romero. The original copyright notice is preserved as
+the MIT license requires. See [LICENSE](LICENSE).

@@ -1,7 +1,7 @@
 {
    "pluginmetadataversion": 2,
    "name": "Xtensa Architecture and ESP8266/ESP32 Loader",
-   "author": "Kevin Romero",
+   "author": "Kevin Romero (fork of Zack Orndorff's binja-xtensa)",
    "type": [
       "binaryview",
       "architecture"
