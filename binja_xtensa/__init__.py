@@ -248,27 +248,35 @@ class XtensaCall0CallingConvention(CallingConvention):
 class XtensaWindowedCallingConvention(CallingConvention):
     """The register-window ABI that dominates ESP32 application code.
 
-    Binary Ninja analyzes each function in its own (rotated) window, so the
-    callee sees its incoming arguments as a2..a7 and returns in a2/a3 -- the
-    same register names as CALL0 from the callee's frame.
+    A CALLn rotates the register window by n, so the caller places the callee's
+    a2..a7 arguments in its own a(n+2)..a15 -- a different physical range per
+    call width (a6.. for CALL4, a10.. for CALL8, a14.. for CALL12). No single
+    flat convention over real registers can express that, because the same
+    callee may be reached at different widths from different sites.
 
-    Saved-register note: in the real windowed ABI the hardware preserves the
-    caller's low window (a0..a(15-N) for a CALLn that rotates by N) across a
-    call, but Binary Ninja has no register-window concept and applies one
-    flat convention from the callee's frame, where a2..a7 are simultaneously
-    the argument/return registers AND (physically, in the caller's frame)
-    preserved. Those two roles can't both be expressed in a flat model. We take
-    the conservative choice -- only a0 (return PC) and a1 (SP) are callee-saved,
-    everything else is caller-saved -- which never claims a clobbered register
-    is preserved (so it never produces incorrect dataflow), at the cost of
-    occasionally not tracking a value held in a2..a7 across a call."""
+    The lifter therefore normalizes every width into a synthetic argument
+    channel (wa0..wa5) at the call site and maps it back to a2..a7 at the
+    callee's ENTRY; returns travel the wr0/wr1 channel symmetrically. This
+    convention simply names those synthetic channel registers, so Binary Ninja
+    recovers windowed arguments/returns from ordinary dataflow.
+
+    Preservation stays conservative: only a0 (return PC) and a1 (SP) are
+    callee-saved; a2..a15 remain caller-saved. The window physically preserves
+    a0..a(n-1), but n is per-call-site, so a flat convention cannot claim any of
+    a2..a7 survive (CALL4 clobbers a4..a15). Keeping them caller-saved never
+    asserts a clobbered register is preserved -- it recovers more without lying.
+
+    eligible_for_heuristics is disabled so Binary Ninja does not eliminate the
+    channel's argument stores before binding them as call parameters."""
     name = "windowed"
-    int_arg_regs = ["a2", "a3", "a4", "a5", "a6", "a7"]
-    int_return_reg = "a2"
-    high_int_return_reg = "a3"
+    int_arg_regs = ["wa0", "wa1", "wa2", "wa3", "wa4", "wa5"]
+    int_return_reg = "wr0"
+    high_int_return_reg = "wr1"
     callee_saved_regs = ["a0", "a1"]
     caller_saved_regs = ["a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10",
-                         "a11", "a12", "a13", "a14", "a15"]
+                         "a11", "a12", "a13", "a14", "a15",
+                         "wa0", "wa1", "wa2", "wa3", "wa4", "wa5", "wr0", "wr1"]
+    eligible_for_heuristics = False
 
 
 def register_stuff():
