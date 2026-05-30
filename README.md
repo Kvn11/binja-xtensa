@@ -8,28 +8,38 @@ Arduino project](https://raw.githubusercontent.com/zackorndorff/binja-xtensa/0.5
 
 ## Features
 
-* Disassembly of nearly all Xtensa instructions
-* Lifting for most Xtensa instructions you'll see in ESP8266 Firmware
+* Disassembly of the full Xtensa base ISA plus the Code Density, Windowed
+  Register, Boolean, single-precision Floating-Point, MAC16 and synchronization
+  options used by the ESP8266 (LX106) and ESP32 (LX6) cores
+* Lifting to BNIL for the common integer, load/store, branch, shift,
+  multiply/divide, floating-point, boolean and **windowed-ABI** instructions
+  (CALL4/8/12, CALLX4/8/12, ENTRY, RETW/RETW.N, MOVSP), which is what makes
+  ESP32 firmware decompile usefully
+* Two calling conventions — `call0` (ESP8266 / ESP32 bootloader) and `windowed`
+  (the register-window ABI that dominates ESP32 application code, used by
+  default)
+* Special- and user-register (RSR/WSR/XSR, RUR/WUR incl. THREADPTR) handling
 * Support for Xtensa ELF files so they will be automatically recognized
-* Loader for ESP8266 raw firmware dumps. This support is a little finicky to
-  use, as there's multiple partitions in the firmware dumps. By default it uses
-  the last one with a detected header; you can adjust this via Open With
-  Options
-    * At the moment it doesn't completely map the sections properly, but it's a
-      start :)
+* Loader for **ESP8266** raw firmware dumps (E9 / bootloaded EA). Multiple
+  partitions are presented as Open-With-Options choices
+* Loader for **ESP32** flash images: parses the extended image header and maps
+  every segment at its load address (DROM/DRAM/IRAM/IROM) with correct
+  read/write/execute semantics, marks all code segments, and sets the entry
+  point
 
 ## What it doesn't do
 
-* It was written mostly as an exercise for the author. It's useful enough to
-  share, but no promises it's useful for your project :)
-* Lift register windowing instructions (it disassembles most of them)
-    * You need this for ESP32 support. It shouldn't be too bad to add, as long
-      as you can figure out how to lift the windowed registers
-* Anything with the optional vector unit
-* Disassemble and lift most of the boolean instructions
-* Lift most floating point instructions
-* Deal with special registers (I figure you might as well look at the asm
-  for that anyway)
+* It was written mostly as an exercise for the original author. It's useful
+  enough to share, but no promises it's useful for your project :)
+* Model the register window precisely (WindowBase is a runtime value the
+  disassembler can't know statically). Each function is analyzed in its own
+  logical `a0`..`a15` window and the cross-call register shift is expressed
+  through the windowed calling convention — see the note in
+  [binja_xtensa/__init__.py](binja_xtensa/__init__.py). This is the pragmatic,
+  decompiler-friendly model real Xtensa tools use.
+* Anything with the optional vector / HiFi DSP unit
+* Model the zero-overhead loop back-edge (LOOP sets up the count and the
+  conditional skip is lifted, but the implicit branch at LEND is not represented)
 * Anything quickly. This is Python, and not particularly well optimized Python
   at that. If you're using this seriously, I recommend rewriting in C++
 * Find `main` in a raw binary for you

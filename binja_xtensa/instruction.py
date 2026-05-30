@@ -132,6 +132,11 @@ class Instruction:
         self.length = None
         self.valid = None
         self.instruction_type = None
+        # MAC16 operand descriptor (set by _decode_MAC16)
+        self.mac16_kind = None   # 'aa'|'ad'|'da'|'dd'|'al_da'|'al_dd'|'l'
+        self.mac16_op = None     # 'mul'|'mula'|'muls'|'umul'|None
+        self.mac16_half = None   # 0..3 -> LL/HL/LH/HH
+        self.mac16_ld = None     # 'ldinc'|'lddec'|None
 
     # These are simple transformations done to immediate values and such.
     # Usually based on a line in the docs that say "the assembler will do such
@@ -144,7 +149,7 @@ class Instruction:
     def simm6(self):
         if self.imm6 is None:
             return None
-        return sign_extend(self.imm6, 8)
+        return sign_extend(self.imm6, 6)
 
     def simm8(self):
         if self.imm8 is None:
@@ -186,6 +191,21 @@ class Instruction:
     def offset_j(self, addr):
         return addr + 4 + sign_extend(self.offset, 18)
 
+    def offset_loop(self, addr):
+        # LOOP/LOOPNEZ/LOOPGTZ: unsigned forward offset to the loop-end label
+        return addr + 4 + self.imm8
+
+    # MAC16 m-register selectors (see _decode_MAC16). mx/my pick a single MAC
+    # register from a one-bit field; mw is a two-bit field selecting m0..m3.
+    def mac16_mx(self):
+        return (self.r >> 2) & 1          # m0 or m1
+
+    def mac16_my(self):
+        return ((self.t >> 2) & 1) + 2    # m2 or m3
+
+    def mac16_mw(self):
+        return self.r & 3                 # m0..m3
+
     _target_offset_map = {
         "BALL": "offset_simm8",
         "BANY": "offset_simm8",
@@ -220,6 +240,9 @@ class Instruction:
         "CALL8": "offset_call",
         "CALL12": "offset_call",
         "J": "offset_j",
+        "LOOP": "offset_loop",
+        "LOOPNEZ": "offset_loop",
+        "LOOPGTZ": "offset_loop",
     }
     def target_offset(self, addr):
         try:
@@ -376,6 +399,27 @@ class Instruction:
         except KeyError:
             return str(self.sr)
 
+    # User registers (RUR/WUR). WUR encodes the UR index in the 8-bit sr field;
+    # RUR encodes it split across the s and t fields ((s<<4)|t).
+    _user_reg_map = {
+        231: "THREADPTR",
+        232: "FCR",   # FP control register
+        233: "FSR",   # FP status register
+    }
+
+    def get_ur_index(self):
+        if self.mnem == "WUR":
+            return self.sr
+        if self.mnem == "RUR":
+            return (self.s << 4) | self.t
+        return None
+
+    def get_ur_name(self):
+        idx = self.get_ur_index()
+        if idx is None:
+            return None
+        return self._user_reg_map.get(idx, "u" + str(idx))
+
     # For instruction decoding, we follow the tables in xtensa.pdf
     # (7.3.1 Opcode Maps)
     # We begin with Table 7-192 Whole Opcode Space. This switches off op0 to
@@ -472,16 +516,38 @@ class Instruction:
         return cls._call_from_map(table_to_look_in, value, insn, insn_bytes)
 
     @staticmethod
+    def _reserved(insn, mnem="(reserved)"):
+        """Mark a reserved/unimplemented encoding as invalid without crashing.
+
+        Reserved slots in the opcode maps (None entries) and leaves the decoder
+        doesn't implement (e.g. the CUST0/CUST1 TIE space) land here. We assign a
+        best-effort length -- the narrow-instruction op0 values 8..13 are 2 bytes,
+        everything else is 3 -- so decode returns a well-formed object. The
+        Architecture treats valid=False as "not an instruction" and lets Binary
+        Ninja mark the bytes undefined, rather than throwing an opaque exception."""
+        insn.mnem = mnem
+        insn.valid = False
+        if insn.length is None:
+            insn.length = 2 if (insn.op0 is not None and 8 <= insn.op0 <= 13) else 3
+        return insn
+
+    @staticmethod
     def _call_from_map(map, index, insn, insn_bytes):
         """Part of the operation of _do_lut, see there for comments"""
         try:
-            name = "_decode_" + map[index]
+            entry = map[index]
         except IndexError:
-            raise Exception(f"Unsupported index {index} in map {map}")
+            entry = None
+        if entry is None:
+            # Reserved encoding per the ISA opcode maps
+            return Instruction._reserved(insn)
 
-        func = getattr(Instruction, name, None)
+        func = getattr(Instruction, "_decode_" + entry, None)
         if not func:
-            raise Exception(f"Unimplemented: {name}")
+            # A leaf referenced by a map but not implemented by the decoder
+            # (e.g. the CUST0/CUST1 customer-TIE space): treat as a defined but
+            # invalid encoding rather than raising.
+            return Instruction._reserved(insn, entry)
 
         return func(insn, insn_bytes)
 
@@ -655,7 +721,9 @@ class Instruction:
     _decode_SSL = mnem("SSL", "RRR", lambda insn: insn.t == 0)
     _decode_SSA8L = mnem("SSA8L", "RRR", lambda insn: insn.t == 0)
     _decode_SSA8B = mnem("SSA8B", "RRR", lambda insn: insn.t == 0)
-    _decode_SSAI = mnem("SSAI", "RRR", lambda insn: insn.t == 0,
+    # SSAI shift is 5 bits: sh[3..0] in s, sh[4] in bit 0 of t. The t field is
+    # "000 sh[4]", so only bits 3..1 of t must be zero (bit 0 is a data bit).
+    _decode_SSAI = mnem("SSAI", "RRR", lambda insn: (insn.t & 0b1110) == 0,
                         inline0=lambda insn, _: insn.s + ((insn.t & 1) << 4) )
     _decode_RER = mnem("RER", "RRR")
     _decode_WER = mnem("WER", "RRR")
@@ -867,18 +935,21 @@ class Instruction:
         # Format RRR (t, s, r vary)
         return cls._do_tbl_layer(insn, insn_bytes, "op2", cls._fp0_map)
 
-    _decode_ADD_S = mnem("ADD_S", "RRR")
-    _decode_SUB_S = mnem("SUB_S", "RRR")
-    _decode_MUL_S = mnem("MUL_S", "RRR")
-    _decode_MADD_S = mnem("MADD_S", "RRR")
-    _decode_MSUB_S = mnem("MSUB_S", "RRR")
-    _decode_ROUND_S = mnem("ROUND_S", "RRR")
-    _decode_TRUNC_S = mnem("TRUNC_S", "RRR")
-    _decode_FLOOR_S = mnem("FLOOR_S", "RRR")
-    _decode_CEIL_S = mnem("CEIL_S", "RRR")
-    _decode_FLOAT_S = mnem("FLOAT_S", "RRR")
-    _decode_UFLOAT_S = mnem("UFLOAT_S", "RRR")
-    _decode_UTRUNC_S = mnem("UTRUNC_S", "RRR")
+    # FP0 group: stored in dotted form (add.s, ...) to match objdump. The
+    # _decode_/_fp0_map names keep the underscore; only the rendered mnemonic
+    # is dotted (disassembly/lift dispatch on mnem.replace(".", "_")).
+    _decode_ADD_S = mnem("ADD.S", "RRR")
+    _decode_SUB_S = mnem("SUB.S", "RRR")
+    _decode_MUL_S = mnem("MUL.S", "RRR")
+    _decode_MADD_S = mnem("MADD.S", "RRR")
+    _decode_MSUB_S = mnem("MSUB.S", "RRR")
+    _decode_ROUND_S = mnem("ROUND.S", "RRR")
+    _decode_TRUNC_S = mnem("TRUNC.S", "RRR")
+    _decode_FLOOR_S = mnem("FLOOR.S", "RRR")
+    _decode_CEIL_S = mnem("CEIL.S", "RRR")
+    _decode_FLOAT_S = mnem("FLOAT.S", "RRR")
+    _decode_UFLOAT_S = mnem("UFLOAT.S", "RRR")
+    _decode_UTRUNC_S = mnem("UTRUNC.S", "RRR")
 
     _fp1op_map = [
         "MOV_S", "ABS_S", None, None, # None is reserved
@@ -953,7 +1024,8 @@ class Instruction:
                          inline0=lambda insn, _: insn.imm8 << 2)
     _decode_ADDI = mnem("ADDI", "RRI8")
     _decode_ADDMI = mnem("ADDMI", "RRI8")
-    _decode_S32C1I = mnem("S32C1I", "RRI8")
+    _decode_S32C1I = mnem("S32C1I", "RRI8",
+                          inline0=lambda insn, _: insn.imm8 << 2)
     _decode_S32RI = mnem("S32RI", "RRI8",
                          inline0=lambda insn, _: insn.imm8 << 2)
 
@@ -1028,19 +1100,73 @@ class Instruction:
     _decode_LSIU = mnem("LSIU", "RRI8")
     _decode_SSIU = mnem("SSIU", "RRI8")
 
-    _mac16_map = [
-        "MACID", "MACCD", "MACDD", "MACAD",
-        "MACIA", "MACCA", "MACDA", "MACAA",
-        "MACI", "MACC", None, None, # None is reserved
-        None, None, None, None,
-    ]
+    # MAC16 option (op0=0100). Two-level dispatch op2 -> op1, decoded
+    # algorithmically per binutils xtensa-modules.c. The chosen operands and
+    # accumulate mode are recorded on the instruction (mac16_kind/op/half/ld) for
+    # the disassembler and lifter. op2 rows: 0 MACID, 1 MACCD, 2 MACDD, 3 MACAD,
+    # 4 MACIA, 5 MACCA, 6 MACDA, 7 MACAA, 8 MACI(LDINC), 9 MACC(LDDEC), 10-15 rsvd.
+    _MAC16_HALF = ["ll", "hl", "lh", "hh"]
+
     @classmethod
     def _decode_MAC16(cls, insn, insn_bytes):
-        # format RRR (t, s, r, op1 vary)
-        return cls._do_tbl_layer(insn, insn_bytes, "op2", cls._mac16_map)
+        insn.instruction_type = InstructionType.RRR
+        insn.length = 3
+        insn.op1 = decode_op1(insn_bytes)
+        insn.op2 = decode_op2(insn_bytes)
+        _decode_components(insn, insn_bytes, ["t", "s", "r"])
+        op1, op2 = insn.op1, insn.op2
+        half_idx = op1 & 3
+        half = cls._MAC16_HALF[half_idx]
 
-    # TODO: Skipping this MAC stuff, seems like a vector processor, that I doubt
-    # the ESP8266 has... 
+        if op2 in (2, 3, 6, 7):
+            # MUL / MULA / MULS (+ UMUL for the AA group); no auto-load.
+            grp = {2: "dd", 3: "ad", 6: "da", 7: "aa"}[op2]
+            base = op1 & 0xc
+            if base == 0:
+                if op2 != 7:
+                    return cls._reserved(insn)  # UMUL exists only for the AA group
+                op = "umul"
+            elif base == 4:
+                op = "mul"
+            elif base == 8:
+                op = "mula"
+            else:  # base == 12
+                op = "muls"
+            insn.mnem = "%s.%s.%s" % (op.upper(), grp.upper(), half.upper())
+            insn.mac16_kind = grp
+            insn.mac16_op = op
+            insn.mac16_half = half_idx
+            insn.valid = True
+            return insn
+
+        if op2 in (0, 1, 4, 5):
+            # MULA.{DD,DA}.<half>.LD{INC,DEC}: multiply-accumulate + auto-load.
+            if (op1 & 0xc) != 8:
+                return cls._reserved(insn)
+            grp = "dd" if op2 in (0, 1) else "da"
+            ld = "ldinc" if op2 in (0, 4) else "lddec"
+            insn.mnem = "MULA.%s.%s.%s" % (grp.upper(), half.upper(), ld.upper())
+            insn.mac16_kind = "al_" + grp
+            insn.mac16_op = "mula"
+            insn.mac16_half = half_idx
+            insn.mac16_ld = ld
+            insn.valid = True
+            return insn
+
+        if op2 == 8 and op1 == 0:
+            insn.mnem = "LDINC"
+            insn.mac16_kind = "l"
+            insn.mac16_ld = "ldinc"
+            insn.valid = True
+            return insn
+        if op2 == 9 and op1 == 0:
+            insn.mnem = "LDDEC"
+            insn.mac16_kind = "l"
+            insn.mac16_ld = "lddec"
+            insn.valid = True
+            return insn
+
+        return cls._reserved(insn)
 
     _calln_map = [
         "CALL0", "CALL4", "CALL8", "CALL12",

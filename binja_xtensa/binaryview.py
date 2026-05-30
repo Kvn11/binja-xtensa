@@ -11,27 +11,27 @@ import struct
 from binaryninja import Architecture, BinaryView, Settings, Symbol
 from binaryninja.enums import SectionSemantics, SegmentFlag, SymbolType
 
-from .firmware_parser import parse_firmware
+from .firmware_parser import (parse_firmware, detect_esp32,
+                              classify_esp32_segment)
 from .known_symbols import known_symbols
 
 def setup_esp8266_map(bv):
-    """Define symbols for the ESP8266 ROM"""
+    """Define the ESP8266 ROM region and its known symbols."""
+    # https://github.com/esp8266/esp8266-wiki/wiki/Memory-Map
+    rom_start = 0x40000000
+    rom_end = 0x40010000
+
+    # Create the ROM segment/section once (not once per symbol).
+    bv.add_auto_segment(rom_start, rom_end - rom_start, 0, 0,
+                        SegmentFlag.SegmentContainsCode |
+                        SegmentFlag.SegmentContainsData |
+                        SegmentFlag.SegmentReadable     |
+                        SegmentFlag.SegmentExecutable)
+    bv.add_auto_section("esp8266_ROM", rom_start, rom_end - rom_start,
+                        SectionSemantics.ExternalSectionSemantics)
+
     for addr, symbol in known_symbols.items():
         addr = int(addr, 0)
-
-        # https://github.com/esp8266/esp8266-wiki/wiki/Memory-Map
-        rom_start = 0x40000000
-        rom_end = 0x40010000
-
-        bv.add_auto_segment(rom_start, rom_end - rom_start, 0, 0,
-                            SegmentFlag.SegmentContainsCode |
-                            SegmentFlag.SegmentContainsData |
-                            SegmentFlag.SegmentReadable     |
-                            SegmentFlag.SegmentExecutable)
-
-        bv.add_auto_section("esp8266_ROM", rom_start, rom_end - rom_start,
-                            SectionSemantics.ExternalSectionSemantics)
-
         if rom_start <= addr <= rom_end:
             sym_type = SymbolType.ImportedFunctionSymbol
         else:
@@ -52,10 +52,14 @@ class ESPFirmware(BinaryView):
 
     @classmethod
     def is_valid_for_data(cls, data):
-        # These happen to be the two magic bytes used by firmware_parser.py
-        if data.read(0, 1) in [b'\xe9', b'\xea']:
-            return True
-        return False
+        # ESP8266 E9/EA images. ESP32 images also start with 0xE9, so defer those
+        # to ESP32Firmware (otherwise we'd mis-load them with the ESP8266 parser
+        # and overlay the wrong ROM map/symbols).
+        if data.read(0, 1) not in [b'\xe9', b'\xea']:
+            return False
+        if detect_esp32(data) is not None:
+            return False
+        return True
 
     @classmethod
     def _pick_default_firmware(cls, firmware_options):
@@ -179,5 +183,70 @@ class ESPFirmware(BinaryView):
                 "entry"))
 
         setup_esp8266_map(self)
+
+        return True
+
+
+class ESP32Firmware(BinaryView):
+    """Loader for ESP32-family flash images (extended 24-byte header).
+
+    Maps every segment at its load address with read/write/execute semantics
+    derived from the ESP32 memory map, marks code segments so analysis runs,
+    sets the entry point, and uses the windowed calling convention by default."""
+    name = "ESP32Firmware"
+    long_name = "ESP32 Firmware"
+
+    def __init__(self, data):
+        BinaryView.__init__(self, file_metadata=data.file, parent_view=data)
+        self.raw = data
+        self.entry_addr = 0
+
+    @classmethod
+    def is_valid_for_data(cls, data):
+        return detect_esp32(data) is not None
+
+    def perform_is_executable(self):
+        return True
+
+    def perform_get_entry_point(self):
+        return self.entry_addr
+
+    def perform_get_address_size(self):
+        return 4
+
+    def init(self):
+        img = detect_esp32(self.parent_view)
+        if img is None:
+            print("Not a recognizable ESP32 image")
+            return False
+
+        self.arch = Architecture['xtensa']
+        self.platform = Architecture['xtensa'].standalone_platform
+        self.entry_addr = 0
+
+        # Adds all segments at their load addresses and sets self.entry_addr.
+        img.load(self, self.parent_view)
+
+        # Give each segment a section with the right semantics so analysis runs
+        # over every code segment (not just the one containing the entry point).
+        for load_addr, size, data_off in img.segments:
+            _flags, is_code = classify_esp32_segment(load_addr)
+            if is_code:
+                sem = SectionSemantics.ReadOnlyCodeSectionSemantics
+                name = "iram" if load_addr < 0x400c0000 else "irom"
+            elif 0x3f000000 <= load_addr < 0x3f800000:
+                sem = SectionSemantics.ReadOnlyDataSectionSemantics
+                name = "drom"
+            else:
+                sem = SectionSemantics.ReadWriteDataSectionSemantics
+                name = "dram"
+            self.add_auto_section("%s_%08x" % (name, load_addr), load_addr,
+                                  size, sem)
+
+        if self.entry_addr != 0:
+            self.add_entry_point(self.entry_addr)
+            self.create_user_function(self.entry_addr)
+            self.define_auto_symbol(Symbol(
+                SymbolType.FunctionSymbol, self.entry_addr, "_start"))
 
         return True

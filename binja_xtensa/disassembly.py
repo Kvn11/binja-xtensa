@@ -177,6 +177,8 @@ def disassemble_instruction(insn, addr):
 
     if func:
         return func(insn, addr)
+    if getattr(insn, "mac16_kind", None):
+        return _disassemble_mac16(insn, addr)
     if insn.instruction_type == InstructionType.RRR:
         return _disassemble_rrr(insn, addr)
     elif insn.instruction_type == InstructionType.RRRN:
@@ -206,26 +208,62 @@ def tokens_to_text(token_list):
     return ''.join([tok.text for tok in token_list])
 
 def _disassemble_RSR(insn, addr):
+    # Render the special register as a mnemonic suffix, e.g. "rsr.SAR a3".
     mnem = insn.mnem + "." + insn.get_sr_name()
-    tokens = []
-    tokens.append(InstructionTextToken(InstructionTextTokenType.InstructionToken,
-                                     mnem))
-    tokens.append(_get_space(len(mnem)))
-    fmts = ["at"]
-    for idx, fmt in enumerate(fmts):
-        if idx > 0:
-            tokens.append(_get_comma())
-
-        if fmt.startswith("inline"):
-            tok_idx = int(fmt[len("inline"):])
-            token_func = args[tok_idx]
-        else:
-            token_func = _disassembly_fmts[fmt]
-
-        tokens.append(token_func(insn, addr))
-    return tokens
+    return [
+        InstructionTextToken(InstructionTextTokenType.InstructionToken, mnem),
+        _get_space(len(mnem)),
+        _get_reg_tok("a" + str(insn.t)),
+    ]
 
 _disassemble_WSR = _disassemble_XSR = _disassemble_RSR
+
+
+def _disassemble_user_reg(insn, addr):
+    """RUR/WUR: render the destination/source AR plus the user-register name."""
+    ar = "a" + str(insn.r if insn.mnem == "RUR" else insn.t)
+    return [
+        InstructionTextToken(InstructionTextTokenType.InstructionToken, insn.mnem),
+        _get_space(len(insn.mnem)),
+        _get_reg_tok(ar),
+        _get_comma(),
+        _get_reg_tok(insn.get_ur_name()),
+    ]
+
+_disassemble_RUR = _disassemble_WUR = _disassemble_user_reg
+
+
+# MAC16: operands depend on the decoded kind (set in _decode_MAC16).
+def _disassemble_mac16(insn, addr):
+    def m(idx):
+        return _get_reg_tok("m" + str(idx))
+    def a(idx):
+        return _get_reg_tok("a" + str(idx))
+    kind = insn.mac16_kind
+    if kind == "aa":
+        ops = [a(insn.s), a(insn.t)]
+    elif kind == "ad":
+        ops = [a(insn.s), m(insn.mac16_my())]
+    elif kind == "da":
+        ops = [m(insn.mac16_mx()), a(insn.t)]
+    elif kind == "dd":
+        ops = [m(insn.mac16_mx()), m(insn.mac16_my())]
+    elif kind == "al_da":
+        ops = [m(insn.mac16_mw()), a(insn.s), m(insn.mac16_mx()), a(insn.t)]
+    elif kind == "al_dd":
+        ops = [m(insn.mac16_mw()), a(insn.s), m(insn.mac16_mx()), m(insn.mac16_my())]
+    elif kind == "l":  # LDINC / LDDEC
+        ops = [m(insn.mac16_mw()), a(insn.s)]
+    else:
+        ops = []
+    tokens = [InstructionTextToken(InstructionTextTokenType.InstructionToken,
+                                   insn.mnem),
+              _get_space(len(insn.mnem))]
+    for idx, op in enumerate(ops):
+        if idx > 0:
+            tokens.append(_get_comma())
+        tokens.append(op)
+    return tokens
 
 # As I mentioned in the decoding code, instruction formats aren't too useful in
 # Xtensa... but we do fall back to these for a few simple instructions. It's
@@ -302,6 +340,9 @@ _disassemble_ENTRY = _dis("as inline0",
                           lambda insn, _: _get_imm32_tok(insn.inline0(_)))
 _disassemble_ESYNC = _dis("") # Just the mnem
 _disassemble_EXCW = _dis("") # Just the mnem
+# EXTUI extracts a bitfield from AR[t] into AR[r]: extui ar, at, shiftimm, maskimm.
+# (The source is the t field -- confirmed against binutils xtensa-modules.c and
+# objdump output; the ISA manual's "AR[s]" wording is an error.)
 _disassemble_EXTUI = _dis("ar at inline0 inline1",
                          lambda insn, _: _get_imm8_tok(insn.extui_shiftimm()),
                          lambda insn, _: _get_imm8_tok(insn.inline1(_)))
@@ -400,5 +441,89 @@ _disassemble_WAITI = _dis("s")
 _disassemble_WDTLB = _dis("at as")
 _disassemble_WER = _dis("at as")
 _disassemble_WITLB = _dis("at as")
-_disassemble_WER = _dis("at as")
-# _disassemble_WUR = _dis("at sr") # sr not yet handled
+
+# ---- Floating-point (single precision) ----
+# Arithmetic: dst/srcs are float registers
+_disassemble_SUB_S = _dis("fr fs ft")
+_disassemble_MUL_S = _dis("fr fs ft")
+_disassemble_MADD_S = _dis("fr fs ft")
+_disassemble_MSUB_S = _dis("fr fs ft")
+_disassemble_MOV_S = _dis("fr fs")
+_disassemble_NEG_S = _dis("fr fs")
+# Conversions float<->int with a scale immediate in the t field
+_disassemble_ROUND_S = _dis("ar fs t")
+_disassemble_TRUNC_S = _dis("ar fs t")
+_disassemble_FLOOR_S = _dis("ar fs t")
+_disassemble_UTRUNC_S = _dis("ar fs t")
+_disassemble_FLOAT_S = _dis("fr as t")
+_disassemble_UFLOAT_S = _dis("fr as t")
+# Compares write a boolean register
+_disassemble_OEQ_S = _dis("br fs ft")
+_disassemble_UEQ_S = _dis("br fs ft")
+_disassemble_OLT_S = _dis("br fs ft")
+_disassemble_ULT_S = _dis("br fs ft")
+_disassemble_OLE_S = _dis("br fs ft")
+_disassemble_ULE_S = _dis("br fs ft")
+_disassemble_UN_S = _dis("br fs ft")
+# Conditional float moves (condition is an a-register, or a boolean for MOVF/MOVT)
+_disassemble_MOVEQZ_S = _dis("fr fs at")
+_disassemble_MOVNEZ_S = _dis("fr fs at")
+_disassemble_MOVLTZ_S = _dis("fr fs at")
+_disassemble_MOVGEZ_S = _dis("fr fs at")
+_disassemble_MOVF_S = _dis("fr fs bt")
+_disassemble_MOVT_S = _dis("fr fs bt")
+# Move between the AR and FR register files
+_disassemble_RFR = _dis("ar fs")
+_disassemble_WFR = _dis("fr as")
+
+# FP indexed load/store: float reg is the r field, address is AR[s]+AR[t]
+_disassemble_LSX = _disassemble_LSXU = _dis("fr as at")
+_disassemble_SSX = _disassemble_SSXU = _dis("fr as at")
+# FP immediate load/store: float reg is the t field, offset is imm8<<2
+_dis_fp_imm = _dis("ft as inline0",
+                   lambda insn, _: _get_imm32_tok(insn.imm8 << 2))
+_disassemble_LSI = _disassemble_LSIU = _dis_fp_imm
+_disassemble_SSI = _disassemble_SSIU = _dis_fp_imm
+
+# CLAMPS clamps to +/-2^(t+7)-1; the third operand is the immediate (t+7)
+_disassemble_CLAMPS = _dis("ar as inline0",
+                           lambda insn, _: _get_imm8_tok(insn.t + 7))
+
+# Integer MOVF/MOVT take a boolean register as the condition (not an a-register)
+_disassemble_MOVF = _disassemble_MOVT = _dis("ar as bt")
+
+# ---- Boolean option (the AND variants already exist above) ----
+_disassemble_ORB = _dis("br bs bt")
+_disassemble_ORBC = _dis("br bs bt")
+_disassemble_XORB = _dis("br bs bt")
+
+# ---- Zero-overhead loops ----
+_disassemble_LOOP = _dis("as target_offset")
+_disassemble_LOOPNEZ = _dis("as target_offset")
+_disassemble_LOOPGTZ = _dis("as target_offset")
+
+# ---- S32C1I: atomic compare-and-store, scaled unsigned offset like S32I ----
+_disassemble_S32C1I = _dis("at as inline0",
+                           lambda insn, _: _get_imm32_tok(insn.inline0(_)))
+
+# ---- Cache ops: single address register + scaled (imm8<<2) offset ----
+_dis_cache = _dis("as inline0",
+                  lambda insn, _: _get_imm32_tok(insn.imm8 << 2))
+_disassemble_DPFR = _disassemble_DPFW = _disassemble_DPFRO = _disassemble_DPFWO = _dis_cache
+_disassemble_DHWB = _disassemble_DHWBI = _disassemble_DHI = _disassemble_DII = _dis_cache
+_disassemble_IPF = _disassemble_IHI = _disassemble_III = _dis_cache
+
+# ---- Windowed spill load/store (exception handlers): negative word offset ----
+# offset = (1^26 || r || 0^2) = (r << 2) - 64, range -64..-4
+_disassemble_L32E = _dis("at as inline0",
+                         lambda insn, _: _get_imm32_tok((insn.r << 2) - 64))
+_disassemble_S32E = _dis("at as inline0",
+                         lambda insn, _: _get_imm32_tok((insn.r << 2) - 64))
+
+# ---- RRI4 cache line ops (rare): single register + small immediate ----
+_dis_cache4 = _dis("as imm4")
+_disassemble_DPFL = _disassemble_DHU = _disassemble_DIU = _dis_cache4
+_disassemble_DIWB = _disassemble_DIWBI = _dis_cache4
+_disassemble_IPFL = _disassemble_IHU = _disassemble_IIU = _dis_cache4
+
+# WUR/RUR are defined above (_disassemble_user_reg)

@@ -201,6 +201,28 @@ def test_tokens_to_text():
     assert compare_insn(disass_text, "ABS    a7, a9")
     assert compare_insn(disass_text, "abs a7, a9")
 
+# Reserved / undocumented special registers. Real ESP32 firmware uses SR numbers
+# that aren't in any Tensilica/ESP table (e.g. XSR a0, 54 -- bytes 00 36 61 --
+# appears 700+ times in main.payload.bin), and Binary Ninja sweeps such bytes as
+# code. The SR must decode to its bare decimal (matching objdump's "176"/"208"
+# placeholders), and get_sr_name() must return that string -- NOT a phantom
+# register name. The lifter relies on this (it routes any SR not in
+# _special_reg_map to an intrinsic) to avoid the "non-existant register" crash.
+@pytest.mark.parametrize("opcode,mnem,sr_num", [
+    ("003661", "XSR", 54),    # the instruction that crashed BN ("string 54")
+    ("008803", "RSR", 136),
+    ("00cd03", "RSR", 205),
+    ("003813", "WSR", 56),
+])
+def test_reserved_special_register_decode(opcode, mnem, sr_num):
+    insn = Instruction.decode(binascii.unhexlify(opcode))
+    assert compare_mnem(insn.mnem, mnem)
+    assert insn.sr == sr_num
+    assert sr_num not in Instruction._special_reg_map
+    assert insn.get_sr_name() == str(sr_num)
+    disass_text = tokens_to_text(disassemble_instruction(insn, 0))
+    assert compare_insn(disass_text, "%s.%d a0" % (mnem, sr_num))
+
 mtd_data = parse_test_data(mnem_text_dump)
 # mnem_text_dump is a bunch of dumped disassembly, uniq'd on the mnem for
 # brevity
@@ -239,7 +261,7 @@ esp32_lots_data = parse_test_data(esp32_lots_text_dump)
 # lots_text_dump is a bunch of dumped disassembly, uniq'd on the mnem for
 # brevity
 @pytest.mark.parametrize("esp32_parsed_line", esp32_lots_data)
-def test_lots_text_dump(esp32_parsed_line):
+def test_esp32_lots_text_dump(esp32_parsed_line):
     if esp32_parsed_line.mnem in ['rer', 'wer']:
         # I disagree with objdump here; the manual states that these insns take
         # arguments; objdump doesn't appear to think so? Also possible my
@@ -277,7 +299,122 @@ def test_mov_s_fpu():
     movs_insn = binascii.unhexlify("0012fa")
     insn = Instruction.decode(movs_insn)
     assert compare_mnem(insn.mnem, "MOV.S")
-    # Disassembly support does not yet exist
-    #disass_text = tokens_to_text(disassemble_instruction(insn, 0x1000))
-    #assert compare_insn(disass_text, "MOV.S f1, f2")
+    disass_text = tokens_to_text(disassemble_instruction(insn, 0x1000))
+    assert compare_insn(disass_text, "MOV.S f1, f2")
+
+
+# ---- ESP32 / extended coverage tests ----
+
+def _dis(hexle, addr=0x1000):
+    insn = Instruction.decode(binascii.unhexlify(hexle))
+    return insn, tokens_to_text(disassemble_instruction(insn, addr))
+
+
+def test_fp_arith_renders_float_regs():
+    # MUL.S f1, f2, f3 (dotted mnemonic + float register operands)
+    insn, txt = _dis("30122a")
+    assert insn.mnem == "MUL.S"
+    assert compare_insn(txt, "MUL.S f1, f2, f3")
+
+
+def test_extui_source_is_t_field():
+    # extui a0, a1, 0, 1 (source is the t field; matches objdump/binutils)
+    insn, txt = _dis("100004")
+    assert insn.mnem == "EXTUI"
+    assert compare_insn(txt, "EXTUI a0, a1, 0, 1")
+
+
+def test_ssai_shift_16_is_valid():
+    # SSAI shift 16 sets bit 0 of the t field; must remain a valid encoding.
+    insn = Instruction.decode(binascii.unhexlify("104040"))
+    assert insn.mnem == "SSAI"
+    assert insn.valid
+    assert insn.inline0(0) == 16
+
+
+def test_s32c1i_scaled_offset():
+    insn, txt = _dis("42e320")
+    assert insn.mnem == "S32C1I"
+    assert insn.inline0(0) == 128        # imm8 (32) << 2
+    assert compare_insn(txt, "S32C1I a4, a3, 128")
+
+
+def test_reserved_encoding_is_invalid_not_crash():
+    # op0 = 1111 is reserved; decoding must not raise and must mark invalid.
+    insn = Instruction.decode(binascii.unhexlify("0f0000"))
+    assert insn is not None
+    assert not insn.valid
+    assert insn.length in (2, 3)
+
+
+def test_cust_encodings_invalid():
+    for hexle in ["000006", "000007"]:   # CUST0 / CUST1 (op0=0, op1=6/7)
+        insn = Instruction.decode(binascii.unhexlify(hexle))
+        assert not insn.valid
+
+
+def test_windowed_decode():
+    assert Instruction.decode(binascii.unhexlify("250000")).mnem == "CALL8"
+    entry = Instruction.decode(binascii.unhexlify("364100"))
+    assert entry.mnem == "ENTRY"
+    assert entry.inline0(0) == 32        # imm12 (4) << 3
+    assert Instruction.decode(binascii.unhexlify("1df0")).mnem == "RETW.N"
+
+
+# MAC16 encodings (little-endian) decoded from binutils hex templates.
+MAC16_CASES = [
+    ("040074", "MUL.AA.LL", "mul.aa.ll a0, a0"),
+    ("040077", "MUL.AA.HH", "mul.aa.hh a0, a0"),
+    ("040070", "UMUL.AA.LL", "umul.aa.ll a0, a0"),
+    ("04007f", "MULS.AA.HH", "muls.aa.hh a0, a0"),
+    ("040024", "MUL.DD.LL", "mul.dd.ll m0, m2"),
+    ("040034", "MUL.AD.LL", "mul.ad.ll a0, m2"),
+    ("040064", "MUL.DA.LL", "mul.da.ll m0, a0"),
+    ("040008", "MULA.DD.LL.LDINC", "mula.dd.ll.ldinc m0, a0, m0, m2"),
+    ("040048", "MULA.DA.LL.LDINC", "mula.da.ll.ldinc m0, a0, m0, a0"),
+    ("040080", "LDINC", "ldinc m0, a0"),
+    ("040090", "LDDEC", "lddec m0, a0"),
+]
+
+
+@pytest.mark.parametrize("hexle,mnem,text", MAC16_CASES)
+def test_mac16(hexle, mnem, text):
+    insn, txt = _dis(hexle)
+    assert insn.mnem == mnem
+    assert insn.valid
+    assert compare_insn(txt, text)
+
+
+def test_fp_loadstore_renders_float_regs():
+    # LSX: float reg is the r field, address is AR[s]+AR[t]
+    insn, txt = _dis("001108")
+    assert insn.mnem == "LSX"
+    assert compare_insn(txt, "LSX f1, a1, a0")
+    # LSI: float reg is the t field, offset is imm8<<2 (153<<2 == 612)
+    insn, txt = _dis("130599")
+    assert insn.mnem == "LSI"
+    assert compare_insn(txt, "LSI f1, a5, 612")
+
+
+def test_clamps_immediate_operand():
+    insn, txt = _dis("002733")
+    assert insn.mnem == "CLAMPS"
+    assert compare_insn(txt, "CLAMPS a2, a7, 7")   # immediate is t+7, not a register
+
+
+def test_movf_boolean_condition():
+    insn, txt = _dis("2030c3")
+    assert insn.mnem == "MOVF"
+    assert compare_insn(txt, "MOVF a3, a0, b2")    # condition is a boolean reg
+
+
+def test_loop_targets_and_renders():
+    # LOOP family must compute a target offset and render (not unimplemented).
+    # LOOP a3, target: B1 map under SI->BI1->B1; build LOOP encoding.
+    # (Decoded form is validated against the disassembler.)
+    for hexle in ["768300", "769300", "76a300"]:  # LOOP/LOOPNEZ/LOOPGTZ a3
+        insn = Instruction.decode(binascii.unhexlify(hexle))
+        txt = tokens_to_text(disassemble_instruction(insn, 0x1000))
+        assert "unimplemented" not in txt
+        assert insn.target_offset(0x1000) is not None
 
