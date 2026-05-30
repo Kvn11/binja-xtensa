@@ -7,7 +7,7 @@ address where that instruction is, and we return BNIL.
 from binaryninja import Architecture, LowLevelILLabel
 
 from .instruction import sign_extend, Instruction
-from .windowed_abi import windowed_arg_srcs, windowed_return_dsts, WINDOWED_CALL_INCR
+from .windowed_abi import windowed_arg_srcs, windowed_return_dsts, WINDOWED_CALL_INCR, NUM_ARG_SLOTS
 
 def _reg_name(insn, fmt):
     """Get the concrete register for a particular part of an instruction
@@ -808,7 +808,7 @@ def _lift_ENTRY(insn, addr, il):
     # Receive the incoming windowed arguments: the callee reads them as a2..a7,
     # which the caller staged into the synthetic wa0..wa5 channel before CALLn
     # (see _emit_windowed_arg_channel).
-    for slot in range(6):
+    for slot in range(NUM_ARG_SLOTS):
         il.append(il.set_reg(4, "a%d" % (slot + 2), il.reg(4, "wa%d" % slot)))
     return insn.length
 
