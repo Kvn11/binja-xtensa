@@ -41,6 +41,7 @@ from .instruction import Instruction
 from .disassembly import disassemble_instruction
 from .lifter import lift
 from .binaryview import ESPFirmware, ESP32Firmware
+from .recover_symbols import _register as _register_recover_command
 
 
 __all__ = ['XtensaLE']
@@ -279,6 +280,9 @@ def register_stuff():
 
     ESPFirmware.register()
     ESP32Firmware.register()
+
+    # __func__ symbol-recovery command (appears under Plugins > Xtensa)
+    _register_recover_command()
 
 
 register_stuff()
