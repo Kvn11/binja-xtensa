@@ -14,6 +14,7 @@ from binaryninja.enums import SectionSemantics, SegmentFlag, SymbolType
 from .firmware_parser import (parse_firmware, detect_esp32,
                               classify_esp32_segment)
 from .known_symbols import known_symbols
+from .esp32_rom_symbols import esp32_rom_symbols
 
 def setup_esp8266_map(bv):
     """Define the ESP8266 ROM region and its known symbols."""
@@ -40,6 +41,34 @@ def setup_esp8266_map(bv):
         bv.define_auto_symbol(Symbol(
             sym_type,
             addr, symbol))
+
+
+def setup_esp32_map(bv):
+    """Define the ESP32 mask-ROM code region and apply its known symbols.
+
+    ESP32 ROM code sits below the firmware's IRAM (0x4008_0000); the region is
+    derived from the symbol map below, so it never overlaps a loaded segment. Symbol
+    names come from ``esp32_rom_symbols`` (generated from esp-idf's esp32.rom*.ld;
+    the ROM is mask-programmed, so the addresses are identical across IDF versions).
+    This turns the ubiquitous 0x4000_xxxx ROM calls -- memcpy/memset/strcmp/ets_*/
+    etc. -- into readable names instead of raw addresses."""
+    if not esp32_rom_symbols:
+        return
+    # Derive the ROM region from the symbol map itself (page-aligned) rather than
+    # hardcoding bounds.
+    rom_start = min(esp32_rom_symbols) & ~0xfff
+    rom_end = (max(esp32_rom_symbols) + 0x1000) & ~0xfff
+
+    bv.add_auto_segment(rom_start, rom_end - rom_start, 0, 0,
+                        SegmentFlag.SegmentContainsCode |
+                        SegmentFlag.SegmentReadable |
+                        SegmentFlag.SegmentExecutable)
+    bv.add_auto_section("esp32_ROM", rom_start, rom_end - rom_start,
+                        SectionSemantics.ExternalSectionSemantics)
+
+    for addr, symbol in esp32_rom_symbols.items():
+        bv.define_auto_symbol(Symbol(
+            SymbolType.ImportedFunctionSymbol, addr, symbol))
 
 
 class ESPFirmware(BinaryView):
@@ -248,5 +277,7 @@ class ESP32Firmware(BinaryView):
             self.create_user_function(self.entry_addr)
             self.define_auto_symbol(Symbol(
                 SymbolType.FunctionSymbol, self.entry_addr, "_start"))
+
+        setup_esp32_map(self)
 
         return True
