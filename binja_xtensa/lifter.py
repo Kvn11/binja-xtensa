@@ -7,6 +7,7 @@ address where that instruction is, and we return BNIL.
 from binaryninja import Architecture, LowLevelILLabel
 
 from .instruction import sign_extend, Instruction
+from .windowed_abi import windowed_arg_srcs, windowed_return_dsts, WINDOWED_CALL_INCR
 
 def _reg_name(insn, fmt):
     """Get the concrete register for a particular part of an instruction
@@ -751,21 +752,50 @@ _lift_NOP_N = _lift_NOP
 # =====================================================================
 # Windowed-register ABI (ESP32)
 #
-# We model each function in its own logical window a0..a15 (which is exactly
-# what the hardware presents after ENTRY rotates WindowBase). The window
-# rotation itself is not representable in flat LLIL, so CALLn lifts to an
-# ordinary call, ENTRY to a stack-pointer adjust, and RETW to a return; the
-# windowed calling convention (see __init__.py) carries the argument/return
-# register mapping.
+# A CALLn rotates the register window by n, so the caller stages the callee's
+# a2..a7 arguments in its own a(n+2)..a15 (ISA-RM 8.1.4) and reads a return value
+# back from a(n+2)/a(n+3) (8.1.5). The window rotation itself is not
+# representable in flat LLIL, so instead we normalize every call width into a
+# synthetic argument channel (wa0..wa5) at the call site and map it back to
+# a2..a7 at the callee's ENTRY; returns travel the wr0/wr1 channel. The windowed
+# calling convention (see __init__.py) names these synthetic registers so Binary
+# Ninja recovers the arguments/returns from ordinary dataflow. The width->register
+# arithmetic lives in windowed_abi.py (pure, unit-tested).
 # =====================================================================
+def _emit_windowed_arg_channel(insn, il):
+    """Normalize this CALLn/CALLXn width's outgoing arguments into the synthetic
+    wa0..wa5 channel; return the window increment n. Slots with no backing caller
+    register at this width (only CALL12) are set undefined so a later, narrower
+    call cannot inherit a wider call's stale argument."""
+    n = WINDOWED_CALL_INCR[insn.mnem]
+    for slot, src in enumerate(windowed_arg_srcs(n)):
+        if src is None:
+            il.append(il.set_reg(4, "wa%d" % slot, il.undefined()))
+        else:
+            il.append(il.set_reg(4, "wa%d" % slot, il.reg(4, src)))
+    return n
+
+
+def _emit_windowed_return_map(n, il):
+    """Map the synthetic return channel back into the caller's physical return
+    registers a(n+2)/a(n+3), both inside the window CALLn clobbers."""
+    lo, hi = windowed_return_dsts(n)
+    il.append(il.set_reg(4, lo, il.reg(4, "wr0")))
+    il.append(il.set_reg(4, hi, il.reg(4, "wr1")))
+
+
 def _lift_call_const(insn, addr, il):
+    n = _emit_windowed_arg_channel(insn, il)
     il.append(il.call(il.const(4, insn.target_offset(addr))))
+    _emit_windowed_return_map(n, il)
     return insn.length
 
 _lift_CALL4 = _lift_CALL8 = _lift_CALL12 = _lift_call_const
 
 def _lift_callx_windowed(insn, addr, il):
+    n = _emit_windowed_arg_channel(insn, il)
     il.append(il.call(il.reg(4, _reg_name(insn, "as"))))
+    _emit_windowed_return_map(n, il)
     return insn.length
 
 _lift_CALLX4 = _lift_CALLX8 = _lift_CALLX12 = _lift_callx_windowed
