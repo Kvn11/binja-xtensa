@@ -1,3 +1,16 @@
 __pycache__
 *.pyc
 .cache
+
+# Local reverse-engineering working data & tooling — never publish.
+# The plugin itself is generic; everything below is specific to a local
+# RE engagement, a third-party firmware image, or local editor/agent config.
+.DS_Store
+.claude/
+.serena/
+.mcp.json
+binja_kb/
+test_resources/
+xtensa-isa-doc/
+*.bndb
+*.report.json
