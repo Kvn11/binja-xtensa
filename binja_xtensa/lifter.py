@@ -805,9 +805,18 @@ def _lift_ENTRY(insn, addr, il):
     sp = _reg_name(insn, "as")
     il.append(il.set_reg(4, sp,
                          il.sub(4, il.reg(4, sp), il.const(4, insn.inline0(addr)))))
+    # Receive the incoming windowed arguments: the callee reads them as a2..a7,
+    # which the caller staged into the synthetic wa0..wa5 channel before CALLn
+    # (see _emit_windowed_arg_channel).
+    for slot in range(6):
+        il.append(il.set_reg(4, "a%d" % (slot + 2), il.reg(4, "wa%d" % slot)))
     return insn.length
 
 def _lift_RETW(insn, addr, il):
+    # Publish the return value (callee a2/a3) into the synthetic return channel
+    # so the caller's _emit_windowed_return_map reads it back as a(n+2)/a(n+3).
+    il.append(il.set_reg(4, "wr0", il.reg(4, "a2")))
+    il.append(il.set_reg(4, "wr1", il.reg(4, "a3")))
     # Return PC = PC[31:30] || a0[29:0]; a0[31:30] holds the window-increment n,
     # not address bits, so mask it off and substitute the current PC's region.
     target = il.or_expr(4,
