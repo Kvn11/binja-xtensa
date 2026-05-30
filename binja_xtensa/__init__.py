@@ -73,6 +73,17 @@ def _build_regs():
             regs[rn] = RegisterInfo(rn, 4, 0)
     # THREADPTR user register (thread-local storage base, set via WUR)
     regs["threadptr"] = RegisterInfo("threadptr", 4, 0)
+    # Synthetic windowed-ABI argument/return channel. NOT produced by the
+    # instruction decoder; the lifter writes/reads these only, to carry
+    # arguments and return values across the CALLn register-window rotation
+    # (the caller's physical arg registers depend on the call width, but every
+    # callee reads a2..a7). XtensaWindowedCallingConvention names wa0..wa5 and
+    # wr0/wr1 as its argument/return registers. See lifter.py's windowed-call
+    # handlers and docs/superpowers/specs/2026-05-30-xtensa-windowed-arg-recovery-design.md.
+    for i in range(6):
+        regs["wa" + str(i)] = RegisterInfo("wa" + str(i), 4, 0)
+    regs["wr0"] = RegisterInfo("wr0", 4, 0)
+    regs["wr1"] = RegisterInfo("wr1", 4, 0)
     return regs
 
 
