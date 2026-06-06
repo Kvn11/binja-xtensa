@@ -22,3 +22,6 @@ xtensa-isa-doc/
 scripts/*
 !scripts/recover_func_symbols.py
 !scripts/check_calling_convention.py
+
+# Internal design/planning notes (engagement-specific); not part of the plugin.
+docs/superpowers/

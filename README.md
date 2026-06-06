@@ -77,8 +77,7 @@ This plugin lifts each call width into a synthetic argument/return channel
 (`wa0..wa5` / `wr0`, `wr1`) at the call site and maps it back to `a2..a7` at the
 callee's `ENTRY`. Binary Ninja then recovers windowed arguments and return
 values through ordinary dataflow, so a windowed call decompiles as
-`handler(method_id, fn_ptr)` rather than `handler()`. The design is written up
-in [docs/](docs/superpowers/specs/2026-05-30-xtensa-windowed-arg-recovery-design.md).
+`handler(method_id, fn_ptr)` rather than `handler()`.
 
 ## What it doesn't do
 
