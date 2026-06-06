@@ -203,7 +203,7 @@ def test_tokens_to_text():
 
 # Reserved / undocumented special registers. Real ESP32 firmware uses SR numbers
 # that aren't in any Tensilica/ESP table (e.g. XSR a0, 54 -- bytes 00 36 61 --
-# appears 700+ times in main.payload.bin), and Binary Ninja sweeps such bytes as
+# which appears throughout real ESP32 firmware), and Binary Ninja sweeps such bytes as
 # code. The SR must decode to its bare decimal (matching objdump's "176"/"208"
 # placeholders), and get_sr_name() must return that string -- NOT a phantom
 # register name. The lifter relies on this (it routes any SR not in

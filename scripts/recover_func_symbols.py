@@ -23,7 +23,7 @@ How to run
 
 * Headless / future reuse on any image (needs a Binary Ninja headless license):
 
-        python3 recover_func_symbols.py main.payload.bin.bndb
+        python3 recover_func_symbols.py firmware.bndb
 
 Safety rules (so it does not mislabel data strings)
 ---------------------------------------------------
