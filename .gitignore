@@ -14,3 +14,11 @@ test_resources/
 xtensa-isa-doc/
 *.bndb
 *.report.json
+*.report.txt
+
+# scripts/ holds local RE tooling that is not part of the plugin. Ignore the
+# whole directory by default and only track the generic plugin helpers, so
+# engagement-specific scripts can never be committed by accident.
+scripts/*
+!scripts/recover_func_symbols.py
+!scripts/check_calling_convention.py

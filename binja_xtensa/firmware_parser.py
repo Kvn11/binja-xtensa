@@ -83,7 +83,6 @@ class E9File:
         self.flash_interface = flash_interface
         self.flash_cfg = flash_cfg
         self.entry_point = entry_point
-        print("entry point:", hex(entry_point))
         self.data_bv_offset = data_bv_offset
         self.outer_size = outer_size
         self.segments = []
@@ -148,7 +147,6 @@ class EAFile:
         self.magic2 = magic2
         self.config = config
         self.entry_point = entry_point
-        print("ENTRY_POINT:", entry_point)
         self.text_length = text_length
         self.data_bv_offset = data_bv_offset
         self.outer_size = outer_size
@@ -251,7 +249,9 @@ _RISCV_CHIP_IDS = {5, 12, 13, 16, 17, 18, 20, 21, 23}  # C3, C2, C6, H2, P4, C5,
 
 
 # ESP32-family (Xtensa: ESP32 / -S2 / -S3) load-address ranges ->
-# (segment flags, is_code) classification.
+# (segment flags, is_code, kind) classification. `kind` is the single source of
+# truth for both segment permissions and the section semantics/name the loader
+# applies (see ESP32Firmware.init), so the two never disagree.
 def classify_esp32_segment(load_addr):
     rx = (SegmentFlag.SegmentContainsCode | SegmentFlag.SegmentReadable |
           SegmentFlag.SegmentExecutable)
@@ -259,15 +259,19 @@ def classify_esp32_segment(load_addr):
     rw = SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable
     # DROM (external flash, read-only constants): ESP32 0x3F40_xxxx, S3 0x3C00_xxxx
     if 0x3c000000 <= load_addr < 0x3f800000:
-        return ro, False
+        return ro, False, "drom"
     # DRAM / internal data RAM: ESP32 0x3FFB_xxxx, S3 0x3FC8_xxxx
     if 0x3f800000 <= load_addr < 0x40000000:
-        return rw, False
-    # IRAM / IROM (instruction RAM and memory-mapped flash code): up to S3 0x4200_0000
+        return rw, False, "dram"
+    # IRAM (on-chip instruction RAM) vs IROM (memory-mapped flash code):
+    # up to S3 0x4200_0000
     if 0x40000000 <= load_addr < 0x42800000:
-        return rx, True
-    # RTC / other -> default read/write data
-    return rw, False
+        return rx, True, ("iram" if load_addr < 0x400c0000 else "irom")
+    # RTC slow/fast memory
+    if 0x50000000 <= load_addr < 0x50002000:
+        return rw, False, "rtc"
+    # Anything else -> default read/write data
+    return rw, False, "dram"
 
 
 def _addr_is_plausible_esp32(load_addr):
@@ -333,7 +337,7 @@ class Esp32Image:
     def load(self, bv, parent_bv):
         end = getattr(parent_bv, "end", None)
         for load_addr, size, data_off in self.segments:
-            flags, _is_code = classify_esp32_segment(load_addr)
+            flags, _is_code, _kind = classify_esp32_segment(load_addr)
             # Clamp the mapped length to the bytes actually present (a truncated
             # image must not map past EOF).
             data_len = size if end is None else max(0, min(size, end - data_off))
@@ -347,22 +351,24 @@ def parse_firmware(bv):
         f = E9File.parse(bv, 0)
         firmware_options.append(f)
     except InvalidFormat:
-        print("Could not find starting E9File")
+        # No E9 image at offset 0: this data isn't an ESP8266 firmware dump.
         return []
 
     if f.outer_size > 0x1000:
         return firmware_options
+    # A second image may follow at 0x1000 (bootloaded EA, or a plain E9). Both
+    # are optional, so a parse miss here is normal -- just skip the option.
     try:
         f2 = EAFile.parse(bv, 0x1000)
         firmware_options.append(f2)
     except InvalidFormat:
-        print("Could not find following EAFile")
+        pass
 
     try:
         f3 = E9File.parse(bv, 0x1000)
         firmware_options.append(f3)
     except InvalidFormat:
-        print("Could not find following E9File")
+        pass
 
     next_addr = firmware_options[-1].bv_offset + firmware_options[-1].outer_size
     if (next_addr < bv.end):

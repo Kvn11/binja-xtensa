@@ -8,7 +8,7 @@ but we present a load option to the user to allow picking a different one.
 import json
 import struct
 
-from binaryninja import Architecture, BinaryView, Settings, Symbol
+from binaryninja import Architecture, BinaryView, Settings, Symbol, log
 from binaryninja.enums import SectionSemantics, SegmentFlag, SymbolType
 
 from .firmware_parser import (parse_firmware, detect_esp32,
@@ -125,8 +125,6 @@ class ESPFirmware(BinaryView):
             }}
             """
 
-        print(setting)
-
         load_settings = Settings("esp_bv_settings")
         assert load_settings.register_group("loader", "Loader")
         assert load_settings.register_setting("loader.esp.whichFirmware",
@@ -171,18 +169,23 @@ class ESPFirmware(BinaryView):
                 raise Exception("You didn't choose one of the firmware options")
             which_firmware = int(which_firmware[len(prefix):])
         except:
-            print("You didn't choose one of the firmware options")
+            log.log_error("ESPFirmware: no valid firmware option selected")
             return False
 
         try:
-            print("Using firmware index", which_firmware)
             the_firmware = firmware_options[which_firmware]
         except:
-            print("You didn't choose one of the firmware options")
+            log.log_error("ESPFirmware: no valid firmware option selected")
             return False
 
-        self.platform = Architecture['xtensa'].standalone_platform
-        self.arch = Architecture['xtensa']
+        arch = Architecture['xtensa']
+        self.arch = arch
+        self.platform = arch.standalone_platform
+        # The ESP8266 (LX106) core has no register window: it is CALL0-only, so
+        # arguments live in a2..a7. Pin this view's default convention to call0
+        # (the arch default is "windowed" for ESP32 application code, whose
+        # synthetic wa0..wa5 channel CALL0 code never writes).
+        self.platform.default_calling_convention = arch.calling_conventions["call0"]
         self.entry_addr = 0
 
         # Will create segments and set entry_addr as needed.
@@ -191,13 +194,8 @@ class ESPFirmware(BinaryView):
         if self.entry_addr != 0:
             for seg in self.segments:
                 if (seg.start <= self.entry_addr <= seg.end) and seg.executable:
-                    #self.add_auto_segment(seg.start, seg.data_length,
-                    #                      seg.data_offset, seg.data_length,
-                    #                      SegmentFlag.SegmentContainsCode |
-                    #                      SegmentFlag.SegmentReadable |
-                    #                      SegmentFlag.SegmentExecutable)
-                    # It seems the ReadOnlyCodeSectionSemantics kicks off the
-                    # autoanalysis
+                    # ReadOnlyCodeSectionSemantics is what kicks off autoanalysis
+                    # over the entry segment.
                     self.add_auto_section('entry_section', seg.start,
                                           seg.end - seg.start,
                                           SectionSemantics.ReadOnlyCodeSectionSemantics
@@ -246,11 +244,15 @@ class ESP32Firmware(BinaryView):
     def init(self):
         img = detect_esp32(self.parent_view)
         if img is None:
-            print("Not a recognizable ESP32 image")
+            log.log_warn("ESP32Firmware: not a recognizable ESP32 image")
             return False
 
-        self.arch = Architecture['xtensa']
-        self.platform = Architecture['xtensa'].standalone_platform
+        arch = Architecture['xtensa']
+        self.arch = arch
+        self.platform = arch.standalone_platform
+        # ESP32 application code is overwhelmingly windowed-ABI; default to that
+        # so Binary Ninja recovers windowed arguments without annotation.
+        self.platform.default_calling_convention = arch.calling_conventions["windowed"]
         self.entry_addr = 0
 
         # Adds all segments at their load addresses and sets self.entry_addr.
@@ -258,18 +260,17 @@ class ESP32Firmware(BinaryView):
 
         # Give each segment a section with the right semantics so analysis runs
         # over every code segment (not just the one containing the entry point).
+        # Section semantics are derived from the same classifier that sets the
+        # segment permissions, so the two can never disagree.
         for load_addr, size, data_off in img.segments:
-            _flags, is_code = classify_esp32_segment(load_addr)
+            _flags, is_code, kind = classify_esp32_segment(load_addr)
             if is_code:
                 sem = SectionSemantics.ReadOnlyCodeSectionSemantics
-                name = "iram" if load_addr < 0x400c0000 else "irom"
-            elif 0x3f000000 <= load_addr < 0x3f800000:
+            elif kind == "drom":
                 sem = SectionSemantics.ReadOnlyDataSectionSemantics
-                name = "drom"
             else:
                 sem = SectionSemantics.ReadWriteDataSectionSemantics
-                name = "dram"
-            self.add_auto_section("%s_%08x" % (name, load_addr), load_addr,
+            self.add_auto_section("%s_%08x" % (kind, load_addr), load_addr,
                                   size, sem)
 
         if self.entry_addr != 0:

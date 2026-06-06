@@ -291,8 +291,11 @@ def register_stuff():
     arch.register_calling_convention(call0)
     arch.register_calling_convention(windowed)
 
-    # ESP32 application code is overwhelmingly windowed; default to that so
-    # Binary Ninja recovers windowed arguments without an explicit annotation.
+    # Arch-level default convention, used for ELF loads (EM_XTENSA). ESP32
+    # application code is overwhelmingly windowed, so default to that. The raw
+    # firmware loaders override this per-view in their init() -- call0 for the
+    # CALL0-only ESP8266, windowed for ESP32 -- so each image type recovers its
+    # arguments correctly regardless of this default.
     esp_plat = arch.standalone_platform
     esp_plat.default_calling_convention = windowed
     esp_plat.system_call_convention = call0

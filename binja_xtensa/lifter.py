@@ -1176,6 +1176,9 @@ def _lift_UTRUNC_S(insn, addr, il):
                          il.low_part(4, il.float_to_int(8, il.reg(4, _reg_name(insn, "fs"))))))
     return insn.length
 
+# FLOAT.S/UFLOAT.S convert AR[s] to FR[r] / 2^t. Like the ROUND/TRUNC family
+# above, the 2^t scale immediate is not modeled (t is almost always 0 in
+# compiler-generated code); the conversion is otherwise exact.
 def _lift_FLOAT_S(insn, addr, il):
     il.append(il.set_reg(4, _reg_name(insn, "fr"),
                          il.int_to_float(4, il.reg(4, _reg_name(insn, "as")))))
